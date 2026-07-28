@@ -444,6 +444,13 @@ export default function App() {
       } else {
         setView('admin')
       }
+
+      // Check query params for adminTab PWA deep linking
+      const params = new URLSearchParams(window.location.search)
+      const tab = params.get('adminTab')
+      if (tab && ['dashboard', 'orders', 'products', 'customers', 'settings'].includes(tab)) {
+        setAdminTab(tab as any)
+      }
     }
     handleUrlRouting()
     window.addEventListener('popstate', handleUrlRouting)

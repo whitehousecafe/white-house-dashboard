@@ -106,7 +106,7 @@ self.addEventListener('push', function(event) {
       requireInteraction: true,
       data: {
         orderId: orderId,
-        url: payload.url || '/admin?adminTab=orders' // Target URL
+        url: payload.url || '/?adminTab=orders' // Target URL
       }
     };
   } catch (err) {
@@ -117,7 +117,7 @@ self.addEventListener('push', function(event) {
       badge: '/icons/badge-72.png',
       tag: 'new-order-fallback',
       data: {
-        url: '/admin?adminTab=orders'
+        url: '/?adminTab=orders'
       }
     };
   }
@@ -131,33 +131,43 @@ self.addEventListener('notificationclick', function(event) {
   console.log('[Service Worker] Notification Clicked.');
   event.notification.close();
 
-  // Retrieve the target URL from metadata
+  // Retrieve the target URL from metadata (default to Orders tab on root URL)
   const targetUrl = (event.notification.data && event.notification.data.url) 
     ? event.notification.data.url 
-    : '/admin?adminTab=orders';
+    : '/?adminTab=orders';
 
   event.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true })
       .then(function(clientList) {
-        // Attempt to find an existing admin dashboard tab and focus it
+        // 1. Attempt to find an existing dashboard tab open at the root URL path
         for (let i = 0; i < clientList.length; i++) {
           const client = clientList[i];
-          const clientUrl = new URL(client.url, self.location.origin).href;
-          const checkUrl = new URL(targetUrl, self.location.origin).href;
+          const clientUrl = new URL(client.url, self.location.origin);
           
-          if (clientUrl === checkUrl && 'focus' in client) {
-            return client.focus();
-          }
-        }
-        // Fallback: search if any dashboard/admin window exists, if so focus it
-        for (let i = 0; i < clientList.length; i++) {
-          const client = clientList[i];
-          if (client.url.includes('/admin') || client.url.includes('adminTab=') || client.url.includes('view=admin')) {
-            if ('focus' in client) return client.focus();
+          if (clientUrl.pathname === '/' && 'focus' in client) {
+            client.focus();
+            if ('navigate' in client) {
+              return client.navigate(targetUrl);
+            }
+            return;
           }
         }
 
-        // If no matching dashboard tab is open, open a new one
+        // 2. Fallback: focus any tab showing the admin page and navigate it
+        for (let i = 0; i < clientList.length; i++) {
+          const client = clientList[i];
+          if (client.url.includes('adminTab=') || client.url.includes('view=admin') || client.url.includes('/admin')) {
+            if ('focus' in client) {
+              client.focus();
+              if ('navigate' in client) {
+                return client.navigate(targetUrl);
+              }
+              return;
+            }
+          }
+        }
+
+        // 3. If no matching dashboard tab is open, open a new window
         if (clients.openWindow) {
           return clients.openWindow(targetUrl);
         }

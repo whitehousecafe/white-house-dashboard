@@ -128,7 +128,7 @@ export default async function handler(req, res) {
       total: totalVal,
       title: 'White House Cafe',
       body: bodyText,
-      url: '/admin?adminTab=orders' // Deep link to orders screen on click
+      url: '/?adminTab=orders' // Deep link to orders screen on click
     });
 
     console.log(`[Push Endpoint] Sending push alerts for Order #${id} to ${subscriptions.length} devices.`);
