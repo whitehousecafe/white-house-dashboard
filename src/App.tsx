@@ -311,6 +311,10 @@ export default function App() {
   const [pushStatus, setPushStatus] = useState<'disabled' | 'enabled' | 'denied' | 'unsupported'>('disabled')
   const [isSubscribing, setIsSubscribing] = useState(false)
 
+  // PWA Install states
+  const [installPromptEvent, setInstallPromptEvent] = useState<any>(null)
+  const [isStandalone, setIsStandalone] = useState(false)
+
   // Local demonstrative states for UI-only elements
   const [productAvailability, setProductAvailability] = useState<Record<number, boolean>>({})
   const [products, setProducts] = useState<MenuItem[]>([])
@@ -394,6 +398,42 @@ export default function App() {
 
   // Webhook and connection integrations from build environment variables
   const n8nWebhookUrl = import.meta.env.VITE_N8N_WEBHOOK_URL || ''
+
+  // Register Service Worker automatically on mount to enable PWA installation
+  useEffect(() => {
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js')
+        .then(reg => console.log('PWA Service Worker registered on mount:', reg.scope))
+        .catch(err => console.error('PWA Service Worker registration failed on mount:', err))
+    }
+  }, [])
+
+  // Detect display mode and listen to beforeinstallprompt event for PWA installation
+  useEffect(() => {
+    const isStandaloneMode = window.matchMedia('(display-mode: standalone)').matches || (navigator as any).standalone
+    setIsStandalone(!!isStandaloneMode)
+
+    const handleInstallPrompt = (e: Event) => {
+      e.preventDefault()
+      setInstallPromptEvent(e)
+      console.log('beforeinstallprompt event fired and captured.')
+    }
+
+    window.addEventListener('beforeinstallprompt', handleInstallPrompt)
+    return () => window.removeEventListener('beforeinstallprompt', handleInstallPrompt)
+  }, [])
+
+  const handleInstallApp = async () => {
+    if (!installPromptEvent) return
+    try {
+      installPromptEvent.prompt()
+      const { outcome } = await installPromptEvent.userChoice
+      console.log(`User response to the PWA install prompt: ${outcome}`)
+      setInstallPromptEvent(null)
+    } catch (err) {
+      console.error('Error handling PWA install prompt:', err)
+    }
+  }
 
   // Sync state navigation with URL pathname / and /admin
   useEffect(() => {
@@ -2328,6 +2368,25 @@ export default function App() {
                          'Enable Web Push Notifications'}
                       </button>
                     )}
+                    {!isStandalone && installPromptEvent && (
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        style={{ 
+                          width: '100%', 
+                          marginTop: '0.25rem', 
+                          height: '40px', 
+                          borderRadius: '8px', 
+                          fontWeight: 'bold', 
+                          backgroundColor: 'rgba(255, 255, 255, 0.05)', 
+                          color: '#fff', 
+                          border: '1px solid rgba(255, 255, 255, 0.1)' 
+                        }}
+                        onClick={handleInstallApp}
+                      >
+                        Install White House Cafe App
+                      </button>
+                    )}
                   </section>
 
                   {/* Dashboard Timeframe Filter Toggle */}
@@ -2676,6 +2735,25 @@ export default function App() {
                          pushStatus === 'enabled' ? '● System Notifications Enabled' :
                          pushStatus === 'denied' ? 'Permission Blocked' :
                          'Enable Web Push Notifications'}
+                      </button>
+                    )}
+                    {!isStandalone && installPromptEvent && (
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        style={{ 
+                          width: '100%', 
+                          marginTop: '0.25rem', 
+                          height: '40px', 
+                          borderRadius: '8px', 
+                          fontWeight: 'bold', 
+                          backgroundColor: 'rgba(255, 255, 255, 0.05)', 
+                          color: '#fff', 
+                          border: '1px solid rgba(255, 255, 255, 0.1)' 
+                        }}
+                        onClick={handleInstallApp}
+                      >
+                        Install White House Cafe App
                       </button>
                     )}
                   </section>

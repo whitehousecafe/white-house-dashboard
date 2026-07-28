@@ -24,15 +24,15 @@ export default async function handler(req, res) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
-  const { id, customer_name, total } = req.body;
+  const record = req.body.record || req.body;
+  const id = record.id || req.body.id;
 
   // 3. Validate request payload
   if (!id) {
     return res.status(400).json({ error: 'Missing required field: id' });
   }
 
-  const name = customer_name || 'Customer';
-  const totalVal = total || 0;
+  let totalVal = record.total || req.body.total || 0;
 
   // 4. Initialize Supabase Admin Client
   const supabaseUrl = process.env.VITE_SUPABASE_URL;
@@ -61,7 +61,44 @@ export default async function handler(req, res) {
       throw logError;
     }
 
-    // 6. Initialize web-push VAPID configuration
+    // 6. Fetch order details from Supabase if items are not provided in request body
+    let items = record.items || req.body.items;
+    
+    if (!items || !Array.isArray(items)) {
+      try {
+        console.log(`[Push Endpoint] Fetching order details for order #${id} from Supabase...`);
+        const { data: orderData, error: orderError } = await supabaseAdmin
+          .from('orders')
+          .select('items, total')
+          .eq('id', id)
+          .single();
+
+        if (!orderError && orderData) {
+          items = orderData.items;
+          if (!totalVal) totalVal = orderData.total;
+          console.log(`[Push Endpoint] Successfully fetched items from Supabase for order #${id}.`);
+        } else {
+          console.warn(`[Push Endpoint] Failed to fetch order #${id} from Supabase:`, orderError);
+        }
+      } catch (fetchErr) {
+        console.error(`[Push Endpoint] Error querying order #${id}:`, fetchErr);
+      }
+    }
+
+    // Calculate total product quantity
+    let itemCount = 0;
+    if (items && Array.isArray(items)) {
+      const foodItems = items.filter(i => i && !i.isAddressMetadata);
+      itemCount = foodItems.reduce((sum, item) => sum + (item.quantity || 1), 0);
+    }
+
+    // Format body text: New order #128 for 3 items totaling ₹635.
+    let bodyText = `New order #${id} totaling ₹${totalVal}.`;
+    if (itemCount > 0) {
+      bodyText = `New order #${id} for ${itemCount} item${itemCount > 1 ? 's' : ''} totaling ₹${totalVal}.`;
+    }
+
+    // 7. Initialize web-push VAPID configuration
     const vapidPublicKey = process.env.VITE_VAPID_PUBLIC_KEY;
     const vapidPrivateKey = process.env.VAPID_PRIVATE_KEY;
     const vapidSubject = process.env.VAPID_SUBJECT;
@@ -73,7 +110,7 @@ export default async function handler(req, res) {
 
     webpush.setVapidDetails(vapidSubject, vapidPublicKey, vapidPrivateKey);
 
-    // 7. Fetch all active push subscriptions
+    // 8. Fetch all active push subscriptions
     const { data: subscriptions, error: dbError } = await supabaseAdmin
       .from('push_subscriptions')
       .select('*');
@@ -85,13 +122,12 @@ export default async function handler(req, res) {
       return res.status(200).json({ message: 'No registered push subscriptions found.' });
     }
 
-    // 8. Construct push payload
+    // 9. Construct push payload
     const payload = JSON.stringify({
       id: id,
-      customer_name: name,
       total: totalVal,
-      title: 'WHITE HOUSE CAFE',
-      body: `New Order #${id}\nCustomer: ${name}\nTotal: ₹${totalVal}`,
+      title: 'White House Cafe',
+      body: bodyText,
       url: '/admin?adminTab=orders' // Deep link to orders screen on click
     });
 
