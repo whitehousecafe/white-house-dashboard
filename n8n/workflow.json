@@ -1,5 +1,5 @@
 {
-  "name": "White House Cafe - WhatsApp Order Notification",
+  "name": "White House Cafe - WhatsApp & Web Push Order Notification",
   "nodes": [
     {
       "parameters": {
@@ -92,6 +92,40 @@
           "name": "Meta Cloud API Access Token"
         }
       }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_WHITE_HOUSE_DASHBOARD_DOMAIN/api/send-push",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_PUSH_WEBHOOK_SECRET"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "bodyParameters": {
+          "parameters": []
+        },
+        "jsonBody": "={\n  \"id\": \"{{$json.body.record.id ? $json.body.record.id : $json.body.order_id}}\",\n  \"customer_name\": \"{{$json.body.record.customer_name ? $json.body.record.customer_name : $json.body.customer_name}}\",\n  \"total\": \"{{$json.body.record.total ? $json.body.record.total : $json.body.total}}\"\n}",
+        "options": {}
+      },
+      "id": "e2f18db0-77a8-4c9f-bb2c-cb0bfae7e6e5",
+      "name": "Trigger Web Push Notification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        640,
+        560
+      ]
     }
   ],
   "connections": {
@@ -105,6 +139,11 @@
           },
           {
             "node": "Notify Admin via WhatsApp",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Trigger Web Push Notification",
             "type": "main",
             "index": 0
           }

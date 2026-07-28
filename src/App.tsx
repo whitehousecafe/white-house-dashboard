@@ -286,10 +286,30 @@ const playChime = () => {
 
 const getProductImage = (id: number | string) => `/product-images/${id}.jpg`;
 
+// Helper to convert VAPID public key from URL-safe Base64 to Uint8Array
+function urlBase64ToUint8Array(base64String: string) {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding)
+    .replace(/\-/g, '+')
+    .replace(/_/g, '/');
+
+  const rawData = window.atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+
+  for (let i = 0; i < rawData.length; ++i) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+  return outputArray;
+}
+
 export default function App() {
   // Navigation: 'customer' | 'admin'
   const [view, setView] = useState<'customer' | 'admin'>('admin')
   const [adminTab, setAdminTab] = useState<'dashboard' | 'orders' | 'products' | 'customers' | 'settings'>('dashboard')
+
+  // Web Push subscription states
+  const [pushStatus, setPushStatus] = useState<'disabled' | 'enabled' | 'denied' | 'unsupported'>('disabled')
+  const [isSubscribing, setIsSubscribing] = useState(false)
 
   // Local demonstrative states for UI-only elements
   const [productAvailability, setProductAvailability] = useState<Record<number, boolean>>({})
@@ -606,6 +626,138 @@ export default function App() {
       fetchCustomersData()
     }
   }, [adminSession, view, adminTab])
+
+  // Check subscription status when admin view is active
+  useEffect(() => {
+    if (view !== 'admin' || !adminSession) return
+
+    if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
+      setPushStatus('unsupported')
+      return
+    }
+
+    if (Notification.permission === 'denied') {
+      setPushStatus('denied')
+      return
+    }
+
+    if (Notification.permission === 'default') {
+      setPushStatus('disabled')
+      return
+    }
+
+    // If permission is already granted, check if active push subscription exists in browser
+    navigator.serviceWorker.ready.then(async (registration) => {
+      try {
+        const subscription = await registration.pushManager.getSubscription()
+        if (subscription) {
+          setPushStatus('enabled')
+        } else {
+          setPushStatus('disabled')
+        }
+      } catch (err) {
+        console.error('Error getting push subscription state:', err)
+        setPushStatus('disabled')
+      }
+    })
+  }, [view, adminSession])
+
+  // Handle push notification registration
+  const handleSubscribePush = async () => {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
+      alert('Push notifications are not supported on this browser/device.')
+      return
+    }
+
+    setIsSubscribing(true)
+
+    try {
+      // 1. Request notification permission from the user
+      const permission = await Notification.requestPermission()
+      if (permission === 'denied') {
+        setPushStatus('denied')
+        alert('Notification permission was denied. Please reset the site permissions in your browser address bar to enable notifications.')
+        return
+      }
+
+      if (permission !== 'granted') {
+        setPushStatus('disabled')
+        return
+      }
+
+      // 2. Register Service Worker explicitly
+      const registration = await navigator.serviceWorker.register('/sw.js')
+      console.log('Service Worker registered:', registration)
+
+      // Wait for service worker to be ready
+      const readyReg = await navigator.serviceWorker.ready
+
+      // 3. Get VAPID Public Key from environment
+      const vapidPublicKey = import.meta.env.VITE_VAPID_PUBLIC_KEY
+      if (!vapidPublicKey) {
+        throw new Error('VITE_VAPID_PUBLIC_KEY is not configured in env variables.')
+      }
+
+      const convertedVapidKey = urlBase64ToUint8Array(vapidPublicKey)
+
+      // 4. Subscribe the user via PushManager
+      const subscription = await readyReg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: convertedVapidKey
+      })
+
+      console.log('Successfully subscribed to Web Push:', subscription)
+
+      // 5. Parse cryptographic keys (p256dh and auth keys)
+      const rawKeys = subscription.toJSON().keys
+      const p256dh = rawKeys ? rawKeys.p256dh : ''
+      const auth = rawKeys ? rawKeys.auth : ''
+
+      if (!p256dh || !auth) {
+        throw new Error('PushSubscription keys are invalid or missing.')
+      }
+
+      // 6. Store push subscription in Supabase push_subscriptions table
+      const client = supabase
+      if (!client) throw new Error('Supabase client is not initialized.')
+
+      // Avoid duplicates: match by subscription endpoint
+      const { data: existingSubs, error: selectError } = await client
+        .from('push_subscriptions')
+        .select('*')
+        .eq('endpoint', subscription.endpoint)
+
+      if (selectError) throw selectError
+
+      if (existingSubs && existingSubs.length > 0) {
+        setPushStatus('enabled')
+        alert('Notifications enabled successfully!')
+        return
+      }
+
+      // Insert subscription record
+      const { error: insertError } = await client
+        .from('push_subscriptions')
+        .insert({
+          endpoint: subscription.endpoint,
+          keys: {
+            p256dh: p256dh,
+            auth: auth
+          },
+          user_id: adminSession?.user?.id || null
+        })
+
+      if (insertError) throw insertError
+
+      setPushStatus('enabled')
+      alert('Notifications enabled successfully! You will now receive background Web Push alerts for new orders.')
+    } catch (err: any) {
+      console.error('Failed to subscribe to Web Push:', err)
+      alert('Failed to enable notifications: ' + err.message)
+    } finally {
+      setIsSubscribing(false)
+    }
+  }
 
   // Fetch products from Supabase and synchronize state
   const fetchProducts = async () => {
@@ -2140,35 +2292,42 @@ export default function App() {
                   {/* Enable Order Notifications Card */}
                   <section className="order-glass-card" style={{ padding: '1.5rem', borderRadius: '16px', display: 'flex', flexDirection: 'column', gap: '0.75rem', marginBottom: '1.5rem' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
-                      <div style={{ width: '40px', height: '40px', borderRadius: '50%', backgroundColor: 'rgba(220, 38, 38, 0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                        <Bell size={18} style={{ color: 'var(--accent)' }} />
+                      <div style={{ width: '40px', height: '40px', borderRadius: '50%', backgroundColor: pushStatus === 'enabled' ? 'rgba(34, 197, 94, 0.1)' : 'rgba(220, 38, 38, 0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                        <Bell size={18} style={{ color: pushStatus === 'enabled' ? 'var(--success)' : 'var(--accent)' }} />
                       </div>
                       <div style={{ flex: 1, minWidth: '200px' }}>
-                        <h3 style={{ fontSize: '0.95rem', fontWeight: '700', color: 'var(--text-primary)', margin: 0 }}>Enable Order Notifications</h3>
-                        <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.2rem', lineHeight: '1.4' }}>Get notified when a new order arrives, even when the dashboard is in the background.</p>
+                        <h3 style={{ fontSize: '0.95rem', fontWeight: '700', color: 'var(--text-primary)', margin: 0 }}>Order Notifications</h3>
+                        <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.2rem', lineHeight: '1.4' }}>
+                          {pushStatus === 'enabled' ? 'Background Web Push is active. You will receive system alerts even if this tab is closed.' :
+                           pushStatus === 'denied' ? 'Notification permission is blocked by your browser settings. Please enable them in your address bar.' :
+                           pushStatus === 'unsupported' ? 'Push notifications are not supported in this browser.' :
+                           'Get notified when a new order arrives, even when the dashboard is closed or device is locked.'}
+                        </p>
                       </div>
                     </div>
-                    <button 
-                      type="button"
-                      className="btn btn-primary" 
-                      style={{ width: '100%', marginTop: '0.5rem', height: '40px', borderRadius: '8px', fontWeight: 'bold' }}
-                      onClick={() => {
-                        if ('Notification' in window) {
-                          Notification.requestPermission().then(permission => {
-                            if (permission === 'granted') {
-                              new Notification('Notifications Enabled!', {
-                                body: 'You will receive desktop alerts for new incoming orders.',
-                                icon: '/favicon.ico'
-                              })
-                            }
-                          })
-                        } else {
-                          alert('Desktop notifications are not supported in this browser.')
-                        }
-                      }}
-                    >
-                      Enable Notifications
-                    </button>
+                    {pushStatus !== 'unsupported' && (
+                      <button 
+                        type="button"
+                        className="btn btn-primary" 
+                        style={{ 
+                          width: '100%', 
+                          marginTop: '0.5rem', 
+                          height: '40px', 
+                          borderRadius: '8px', 
+                          fontWeight: 'bold',
+                          backgroundColor: pushStatus === 'enabled' ? 'rgba(34, 197, 94, 0.1)' : 'var(--accent)',
+                          borderColor: pushStatus === 'enabled' ? 'rgba(34, 197, 94, 0.2)' : 'var(--accent)',
+                          color: pushStatus === 'enabled' ? 'var(--success)' : '#fff'
+                        }}
+                        disabled={pushStatus === 'enabled' || isSubscribing}
+                        onClick={handleSubscribePush}
+                      >
+                        {isSubscribing ? 'Registering...' :
+                         pushStatus === 'enabled' ? '● System Notifications Enabled' :
+                         pushStatus === 'denied' ? 'Permission Blocked' :
+                         'Enable Web Push Notifications'}
+                      </button>
+                    )}
                   </section>
 
                   {/* Dashboard Timeframe Filter Toggle */}
@@ -2483,35 +2642,42 @@ export default function App() {
                   {/* Enable Order Notifications Card */}
                   <section className="order-glass-card" style={{ padding: '1.5rem', borderRadius: '16px', display: 'flex', flexDirection: 'column', gap: '0.75rem', marginBottom: '1.5rem' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
-                      <div style={{ width: '40px', height: '40px', borderRadius: '50%', backgroundColor: 'rgba(220, 38, 38, 0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                        <Bell size={18} style={{ color: 'var(--accent)' }} />
+                      <div style={{ width: '40px', height: '40px', borderRadius: '50%', backgroundColor: pushStatus === 'enabled' ? 'rgba(34, 197, 94, 0.1)' : 'rgba(220, 38, 38, 0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                        <Bell size={18} style={{ color: pushStatus === 'enabled' ? 'var(--success)' : 'var(--accent)' }} />
                       </div>
                       <div style={{ flex: 1, minWidth: '200px' }}>
-                        <h3 style={{ fontSize: '0.95rem', fontWeight: '700', color: 'var(--text-primary)', margin: 0 }}>Enable Order Notifications</h3>
-                        <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.2rem', lineHeight: '1.4' }}>Get notified when a new order arrives, even when the dashboard is in the background.</p>
+                        <h3 style={{ fontSize: '0.95rem', fontWeight: '700', color: 'var(--text-primary)', margin: 0 }}>Order Notifications</h3>
+                        <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.2rem', lineHeight: '1.4' }}>
+                          {pushStatus === 'enabled' ? 'Background Web Push is active. You will receive system alerts even if this tab is closed.' :
+                           pushStatus === 'denied' ? 'Notification permission is blocked by your browser settings. Please enable them in your address bar.' :
+                           pushStatus === 'unsupported' ? 'Push notifications are not supported in this browser.' :
+                           'Get notified when a new order arrives, even when the dashboard is closed or device is locked.'}
+                        </p>
                       </div>
                     </div>
-                    <button 
-                      type="button"
-                      className="btn btn-primary" 
-                      style={{ width: '100%', marginTop: '0.5rem', height: '40px', borderRadius: '8px', fontWeight: 'bold' }}
-                      onClick={() => {
-                        if ('Notification' in window) {
-                          Notification.requestPermission().then(permission => {
-                            if (permission === 'granted') {
-                              new Notification('Notifications Enabled!', {
-                                body: 'You will receive desktop alerts for new incoming orders.',
-                                icon: '/favicon.ico'
-                              })
-                            }
-                          })
-                        } else {
-                          alert('Desktop notifications are not supported in this browser.')
-                        }
-                      }}
-                    >
-                      Enable Notifications
-                    </button>
+                    {pushStatus !== 'unsupported' && (
+                      <button 
+                        type="button"
+                        className="btn btn-primary" 
+                        style={{ 
+                          width: '100%', 
+                          marginTop: '0.5rem', 
+                          height: '40px', 
+                          borderRadius: '8px', 
+                          fontWeight: 'bold',
+                          backgroundColor: pushStatus === 'enabled' ? 'rgba(34, 197, 94, 0.1)' : 'var(--accent)',
+                          borderColor: pushStatus === 'enabled' ? 'rgba(34, 197, 94, 0.2)' : 'var(--accent)',
+                          color: pushStatus === 'enabled' ? 'var(--success)' : '#fff'
+                        }}
+                        disabled={pushStatus === 'enabled' || isSubscribing}
+                        onClick={handleSubscribePush}
+                      >
+                        {isSubscribing ? 'Registering...' :
+                         pushStatus === 'enabled' ? '● System Notifications Enabled' :
+                         pushStatus === 'denied' ? 'Permission Blocked' :
+                         'Enable Web Push Notifications'}
+                      </button>
+                    )}
                   </section>
 
                   {/* Search & Filters */}
